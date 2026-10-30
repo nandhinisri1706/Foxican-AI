@@ -39,6 +39,8 @@ FRONTEND_URLS = [
     "http://localhost:5174",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
+    "https://6ae4cdb18e43ceb38bb9a552--foxican-ai.netlify.app",
+    "https://foxican-ai.netlify.app"
 ]
 
 PRODUCTION_FRONTEND_URL = os.getenv(
