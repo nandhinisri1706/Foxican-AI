@@ -6,7 +6,8 @@ import os
 import uuid
 from io import BytesIO
 from typing import Any
-
+from pathlib import Path
+from fastapi.responses import FileResponse
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -15,6 +16,8 @@ from pydantic import BaseModel, Field
 from PIL import Image, ImageOps
 
 load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent.parent
+FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 # -------------------- CONFIGURATION --------------------
 
@@ -723,16 +726,19 @@ async def create_and_wait_for_video(
 
 
 # -------------------- BASIC ROUTES --------------------
-
 @app.get("/")
 async def root():
+    index_file = FRONTEND_DIST / "index.html"
+
+    if index_file.exists():
+        return FileResponse(index_file)
 
     return {
         "name": "FOXICAN AI API",
         "status": "running",
         "version": "2.3.0",
+        "message": "Frontend build not found."
     }
-
 
 @app.get("/api/health")
 async def health():
@@ -879,3 +885,16 @@ async def generate_video(request: VideoRequest):
         "ratio": request.ratio,
         "scenes": len(image_urls),
     }
+# -------------------- FRONTEND STATIC FILES --------------------
+
+from fastapi.staticfiles import StaticFiles
+
+if FRONTEND_DIST.exists():
+    app.mount(
+        "/",
+        StaticFiles(
+            directory=str(FRONTEND_DIST),
+            html=True,
+        ),
+        name="frontend",
+    )
