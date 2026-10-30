@@ -19,14 +19,43 @@ const MAX_HISTORY = 15;
 const API_URL =
   import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
+function getImageSource(image: unknown): string {
+  if (typeof image !== "string" || !image.trim()) {
+    throw new Error("The image API did not return a valid image.");
+  }
+
+  const value = image.trim();
+
+  if (
+    value.startsWith("data:image/") ||
+    value.startsWith("https://") ||
+    value.startsWith("http://") ||
+    value.startsWith("blob:")
+  ) {
+    return value;
+  }
+
+  // Cloudflare commonly returns a raw Base64 JPEG.
+  return `data:image/jpeg;base64,${value.replace(/\s/g, "")}`;
+}
+
 function App() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const savedTheme = localStorage.getItem("foxican-theme");
-    return savedTheme === "light" ? "light" : "dark";
+    try {
+      return localStorage.getItem("foxican-theme") === "light"
+        ? "light"
+        : "dark";
+    } catch {
+      return "dark";
+    }
   });
 
   useEffect(() => {
-    localStorage.setItem("foxican-theme", theme);
+    try {
+      localStorage.setItem("foxican-theme", theme);
+    } catch {
+      // Theme still works for the current session.
+    }
   }, [theme]);
 
   const [page, setPage] = useState<"create" | "history">("create");
@@ -39,6 +68,7 @@ function App() {
   const [copyMessage, setCopyMessage] = useState("");
   const [generatedImage, setGeneratedImage] = useState("");
   const [generatedVideo, setGeneratedVideo] = useState("");
+  const [imageLoadError, setImageLoadError] = useState(false);
   const [loading, setLoading] = useState(false);
   const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
 
@@ -73,7 +103,13 @@ function App() {
   });
 
   useEffect(() => {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    } catch {
+      setMessage(
+        "Storage is full. Delete some older history items to save new creations."
+      );
+    }
   }, [history]);
 
   function addToHistory(item: HistoryItem) {
@@ -94,6 +130,7 @@ function App() {
     setMessage("");
     setGeneratedImage("");
     setGeneratedVideo("");
+    setImageLoadError(false);
 
     try {
       const response = await fetch(`${API_URL}/api/generate-image`, {
@@ -118,19 +155,12 @@ function App() {
         );
       }
 
-      const image =
-        data.image || data.image_url || data.data?.image;
+      const rawImage =
+        data.image ||
+        data.image_url ||
+        data.data?.image;
 
-      if (typeof image !== "string" || !image) {
-        throw new Error("The image API did not return an image.");
-      }
-
-      const imageSource =
-        image.startsWith("data:") ||
-        image.startsWith("http://") ||
-        image.startsWith("https://")
-          ? image
-          : `data:image/jpeg;base64,${image}`;
+      const imageSource = getImageSource(rawImage);
 
       setGeneratedImage(imageSource);
 
@@ -145,7 +175,7 @@ function App() {
         createdAt: new Date().toLocaleString(),
       });
 
-      setMessage("Image generated successfully!");
+      setMessage("Image received. Loading preview...");
     } catch (error) {
       setMessage(
         `Image generation failed: ${
@@ -157,6 +187,18 @@ function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleImageLoaded() {
+    setImageLoadError(false);
+    setMessage("Image generated and loaded successfully!");
+  }
+
+  function handleImageError() {
+    setImageLoadError(true);
+    setMessage(
+      "The API returned an image, but the browser could not display it. Check the image data returned by the backend."
+    );
   }
 
   // -------------------- VIDEO GENERATION --------------------
@@ -171,6 +213,7 @@ function App() {
     setMessage("Connecting to the video generation model...");
     setGeneratedImage("");
     setGeneratedVideo("");
+    setImageLoadError(false);
 
     const supportedVideoRatios = [
       "16:9",
@@ -257,16 +300,44 @@ function App() {
 
   // -------------------- DOWNLOAD --------------------
 
-  function downloadMedia(url: string, filename: string) {
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
+  async function downloadMedia(url: string, filename: string) {
+    if (!url) {
+      setMessage("The media file is not available to download.");
+      return;
+    }
 
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    try {
+      // Convert data URLs and accessible URLs into a Blob download.
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error("Could not retrieve the media file.");
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = filename;
+
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+    } catch {
+      // Fallback for providers that block cross-origin fetch.
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
   }
 
   // -------------------- COPY PROMPT --------------------
@@ -327,6 +398,7 @@ function App() {
 
     setGeneratedImage("");
     setGeneratedVideo("");
+    setImageLoadError(false);
     setMessage(
       "Prompt loaded. Edit it if needed, then generate again."
     );
@@ -349,7 +421,8 @@ function App() {
     message.toLowerCase().includes("failed") ||
     message.toLowerCase().includes("cannot connect") ||
     message.toLowerCase().includes("please enter") ||
-    message.toLowerCase().includes("timed out");
+    message.toLowerCase().includes("timed out") ||
+    message.toLowerCase().includes("could not display");
 
   // -------------------- MAIN UI --------------------
 
@@ -483,8 +556,6 @@ function App() {
                   <span className="ai-chip">AI STUDIO</span>
                 </div>
 
-                {/* CREATION MODE */}
-
                 <div className="field-group">
                   <label className="field-label">
                     Creation mode
@@ -512,6 +583,7 @@ function App() {
                         setMode("video");
                         setMessage("");
                         setGeneratedImage("");
+                        setImageLoadError(false);
                       }}
                     >
                       <span>▷</span> Video
@@ -521,8 +593,6 @@ function App() {
                     </button>
                   </div>
                 </div>
-
-                {/* PROMPT */}
 
                 <div className="field-group">
                   <div className="label-row">
@@ -562,8 +632,6 @@ function App() {
                       : "Include the subject, style, lighting and mood."}
                   </div>
                 </div>
-
-                {/* SETTINGS */}
 
                 <div className="settings-grid">
                   <div className="field-group">
@@ -658,8 +726,6 @@ function App() {
                   </div>
                 </div>
 
-                {/* VIDEO DURATION */}
-
                 {mode === "video" && (
                   <div className="field-group">
                     <label
@@ -691,8 +757,6 @@ function App() {
                     </p>
                   </div>
                 )}
-
-                {/* GENERATE BUTTON */}
 
                 <button
                   className="generate-button"
@@ -733,8 +797,6 @@ function App() {
                 )}
               </div>
 
-              {/* RESULT PANEL */}
-
               <div className="result-panel">
                 <div className="panel-heading">
                   <div>
@@ -773,19 +835,7 @@ function App() {
                   </div>
                 ) : generatedVideo ? (
                   <div className="generated-result">
-                    <div
-                      style={{
-                        position: "relative",
-                        width: "100%",
-                        overflow: "hidden",
-                        borderRadius: "16px",
-                        background: "#080612",
-                        border:
-                          "1px solid rgba(177, 125, 255, 0.22)",
-                        boxShadow:
-                          "0 18px 55px rgba(0, 0, 0, 0.35)",
-                      }}
-                    >
+                    <div className="generated-video-wrapper">
                       <video
                         ref={generatedVideoRef}
                         className="generated-video"
@@ -793,22 +843,15 @@ function App() {
                         controls
                         playsInline
                         preload="metadata"
-                        style={{
-                          display: "block",
-                          width: "100%",
-                          maxHeight: "520px",
-                          objectFit: "contain",
-                        }}
                       >
                         Your browser does not support video playback.
                       </video>
 
                       <button
                         type="button"
-                        className="secondary-button"
+                        className="secondary-button fullscreen-button"
                         onClick={() => {
-                          const video =
-                            generatedVideoRef.current;
+                          const video = generatedVideoRef.current;
 
                           if (video?.requestFullscreen) {
                             void video.requestFullscreen();
@@ -823,16 +866,6 @@ function App() {
                             ).webkitEnterFullscreen();
                           }
                         }}
-                        style={{
-                          position: "absolute",
-                          top: "12px",
-                          right: "12px",
-                          zIndex: 2,
-                          background: "rgba(15, 10, 30, 0.82)",
-                          border:
-                            "1px solid rgba(255,255,255,0.22)",
-                          backdropFilter: "blur(12px)",
-                        }}
                       >
                         ⛶ Fullscreen
                       </button>
@@ -845,9 +878,7 @@ function App() {
                     <div className="video-info">
                       <span>{duration}s video</span>
                       <span>
-                        {quality === "Full HD"
-                          ? "1080P"
-                          : "720P"}
+                        {quality === "Full HD" ? "1080P" : "720P"}
                       </span>
                     </div>
 
@@ -855,7 +886,7 @@ function App() {
                       <button
                         className="secondary-button"
                         onClick={() =>
-                          downloadMedia(
+                          void downloadMedia(
                             generatedVideo,
                             `foxican-${Date.now()}.mp4`
                           )
@@ -874,17 +905,31 @@ function App() {
                   </div>
                 ) : generatedImage ? (
                   <div className="generated-result">
-                    <img
-                      src={generatedImage}
-                      alt="AI-generated creation"
-                      className="generated-image"
-                    />
+                    {imageLoadError ? (
+                      <div className="image-error">
+                        <div className="empty-history-icon">!</div>
+                        <h3>Image preview unavailable</h3>
+                        <p>
+                          The backend returned an image, but the
+                          browser could not decode or display it.
+                          Check the image response format.
+                        </p>
+                      </div>
+                    ) : (
+                      <img
+                        src={generatedImage}
+                        alt="AI-generated creation"
+                        className="generated-image"
+                        onLoad={handleImageLoaded}
+                        onError={handleImageError}
+                      />
+                    )}
 
                     <div className="result-actions">
                       <button
                         className="secondary-button"
                         onClick={() =>
-                          downloadMedia(
+                          void downloadMedia(
                             generatedImage,
                             `foxican-${Date.now()}.jpg`
                           )
@@ -908,31 +953,18 @@ function App() {
                       <div className="art-orbit orbit-two" />
                       <div className="art-glow" />
 
-                      <span className="art-star star-one">
-                        ✦
-                      </span>
-                      <span className="art-star star-two">
-                        ✧
-                      </span>
-                      <span className="art-star star-three">
-                        ✦
-                      </span>
+                      <span className="art-star star-one">✦</span>
+                      <span className="art-star star-two">✧</span>
+                      <span className="art-star star-three">✦</span>
 
                       <img
                         className="art-center"
                         src="/foxican-logo.png"
                         alt="FOXICAN AI logo"
-                        style={{
-                          width: 150,
-                          height: 150,
-                          objectFit: "contain",
-                        }}
                       />
                     </div>
 
-                    <h3>
-                      Your next masterpiece starts here
-                    </h3>
+                    <h3>Your next masterpiece starts here</h3>
 
                     <p>
                       Write a prompt and click Generate{" "}
@@ -954,8 +986,6 @@ function App() {
             </div>
           </section>
         ) : (
-          // -------------------- HISTORY PAGE --------------------
-
           <section className="history-page">
             <div className="history-heading">
               <div>
@@ -993,8 +1023,7 @@ function App() {
                 <h3>Your gallery is waiting</h3>
 
                 <p>
-                  Your generated images and videos will appear
-                  here.
+                  Your generated images and videos will appear here.
                 </p>
 
                 <button
@@ -1011,10 +1040,7 @@ function App() {
                     item.type || (item.video ? "video" : "image");
 
                   return (
-                    <article
-                      className="history-card"
-                      key={item.id}
-                    >
+                    <article className="history-card" key={item.id}>
                       <button
                         type="button"
                         className="history-image-button"
@@ -1062,10 +1088,7 @@ function App() {
                         </p>
 
                         <div className="history-meta">
-                          <span>
-                            {item.ratio || "1:1"} ratio
-                          </span>
-
+                          <span>{item.ratio || "1:1"} ratio</span>
                           <span>
                             {item.createdAt || "Saved creation"}
                           </span>
@@ -1081,9 +1104,7 @@ function App() {
 
                           <button
                             className="history-action"
-                            onClick={() =>
-                              void copyPrompt(item.prompt)
-                            }
+                            onClick={() => void copyPrompt(item.prompt)}
                           >
                             Copy Prompt
                           </button>
@@ -1098,14 +1119,12 @@ function App() {
                           <button
                             className="history-action"
                             onClick={() =>
-                              downloadMedia(
+                              void downloadMedia(
                                 itemType === "video"
                                   ? item.video!
                                   : item.image!,
                                 `foxican-${item.id}.${
-                                  itemType === "video"
-                                    ? "mp4"
-                                    : "jpg"
+                                  itemType === "video" ? "mp4" : "jpg"
                                 }`
                               )
                             }
@@ -1115,9 +1134,7 @@ function App() {
 
                           <button
                             className="history-action delete-action"
-                            onClick={() =>
-                              deleteHistoryItem(item.id)
-                            }
+                            onClick={() => deleteHistoryItem(item.id)}
                           >
                             Delete
                           </button>
@@ -1128,8 +1145,6 @@ function App() {
                 })}
               </div>
             )}
-
-            {/* PREVIEW MODAL */}
 
             {previewItem && (
               <div
@@ -1178,24 +1193,17 @@ function App() {
 
                   <div className="history-meta preview-meta">
                     <span>
-                      {previewItem.type === "video"
-                        ? "VIDEO"
-                        : "IMAGE"}
+                      {previewItem.type === "video" ? "VIDEO" : "IMAGE"}
                     </span>
 
-                    <span>
-                      {previewItem.ratio || "1:1"} ratio
-                    </span>
-
+                    <span>{previewItem.ratio || "1:1"} ratio</span>
                     <span>{previewItem.createdAt}</span>
                   </div>
 
                   <div className="history-actions preview-actions">
                     <button
                       className="history-action"
-                      onClick={() =>
-                        void copyPrompt(previewItem.prompt)
-                      }
+                      onClick={() => void copyPrompt(previewItem.prompt)}
                     >
                       Copy Prompt
                     </button>
@@ -1203,14 +1211,12 @@ function App() {
                     <button
                       className="history-action"
                       onClick={() =>
-                        downloadMedia(
+                        void downloadMedia(
                           previewItem.type === "video"
                             ? previewItem.video!
                             : previewItem.image!,
                           `foxican-${previewItem.id}.${
-                            previewItem.type === "video"
-                              ? "mp4"
-                              : "jpg"
+                            previewItem.type === "video" ? "mp4" : "jpg"
                           }`
                         )
                       }
