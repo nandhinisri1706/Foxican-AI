@@ -1,6 +1,6 @@
-
 import asyncio
 import base64
+import binascii
 import os
 import uuid
 from typing import Any
@@ -31,7 +31,6 @@ IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 MAX_VIDEO_DURATION = 60
 MAX_SCENES = 6
 
-# Local development origins
 FRONTEND_URLS = [
     "http://localhost:5173",
     "http://localhost:5174",
@@ -39,7 +38,6 @@ FRONTEND_URLS = [
     "http://127.0.0.1:5174",
 ]
 
-# Add deployed frontend URL through backend environment variables.
 PRODUCTION_FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
 if PRODUCTION_FRONTEND_URL:
@@ -47,7 +45,7 @@ if PRODUCTION_FRONTEND_URL:
 
 app = FastAPI(
     title="FOXICAN AI API",
-    version="2.1.0",
+    version="2.2.0",
 )
 
 app.add_middleware(
@@ -71,7 +69,7 @@ class VideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=2500)
     ratio: str = "16:9"
     resolution: str = "720P"
-    duration: int = Field(default=60, ge=1, le=MAX_VIDEO_DURATION)
+    duration: int = Field(default=60, ge=10, le=MAX_VIDEO_DURATION)
 
 
 # -------------------- COMMON HELPERS --------------------
@@ -191,7 +189,7 @@ def get_image_bytes(response: httpx.Response) -> tuple[bytes, str]:
 
         return base64.b64decode(image), "image/jpeg"
 
-    except (ValueError, base64.binascii.Error):
+    except (ValueError, binascii.Error):
         raise HTTPException(
             status_code=502,
             detail="Cloudflare returned invalid image data.",
@@ -209,15 +207,15 @@ async def generate_scene_image(
     width, height = get_image_dimensions(aspect_ratio)
 
     url = f"{CLOUDFLARE_API_BASE}/run/{IMAGE_MODEL}"
-    last_error = "Cloudflare request failed."
 
-    # FLUX Schnell uses four inference steps.
     payload = {
         "prompt": prompt,
         "steps": 4,
         "width": width,
         "height": height,
     }
+
+    last_error = "Cloudflare request failed."
 
     for attempt in range(3):
         try:
@@ -386,7 +384,11 @@ def distribute_scene_durations(total_duration: int) -> list[int]:
 
 # -------------------- VIDEO RESOLUTION --------------------
 
-def get_video_resolution(ratio: str, resolution: str) -> tuple[str, int, int]:
+def get_video_resolution(
+    ratio: str,
+    resolution: str,
+) -> tuple[str, int, int]:
+
     if resolution not in {"720P", "1080P"}:
         raise HTTPException(
             status_code=400,
@@ -408,6 +410,7 @@ def get_video_resolution(ratio: str, resolution: str) -> tuple[str, int, int]:
     if ratio == "4:3":
         if resolution == "1080P":
             return "custom", 1440, 1080
+
         return "custom", 960, 720
 
     if resolution == "1080P":
@@ -528,7 +531,6 @@ async def create_and_wait_for_video(
                 detail="JSON2Video did not return a project ID.",
             )
 
-        # Poll every 5 seconds, up to 15 minutes.
         for _ in range(180):
             await asyncio.sleep(5)
 
@@ -600,7 +602,7 @@ async def root():
     return {
         "name": "FOXICAN AI API",
         "status": "running",
-        "version": "2.1.0",
+        "version": "2.2.0",
     }
 
 
@@ -678,7 +680,6 @@ async def generate_video(request: VideoRequest):
             detail="Prompt cannot be empty.",
         )
 
-    # Validate ratio and resolution before making provider requests.
     get_video_resolution(request.ratio, request.resolution)
 
     image_urls = []
@@ -689,7 +690,6 @@ async def generate_video(request: VideoRequest):
 
     async with httpx.AsyncClient() as client:
 
-        # Generate and upload each scene image.
         for index, scene_prompt in enumerate(selected_scene_prompts):
             image_bytes, content_type = await generate_scene_image(
                 client,
