@@ -16,7 +16,7 @@ type HistoryItem = {
 
 const HISTORY_KEY = "foxican-ai-history";
 const MAX_HISTORY = 15;
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 function App() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
