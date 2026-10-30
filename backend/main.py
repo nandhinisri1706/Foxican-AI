@@ -1,8 +1,10 @@
+
 import asyncio
 import base64
 import binascii
 import os
 import uuid
+from io import BytesIO
 from typing import Any
 
 import httpx
@@ -10,6 +12,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from PIL import Image, ImageOps
 
 load_dotenv()
 
@@ -38,14 +41,16 @@ FRONTEND_URLS = [
     "http://127.0.0.1:5174",
 ]
 
-PRODUCTION_FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+PRODUCTION_FRONTEND_URL = os.getenv(
+    "FRONTEND_URL", ""
+).strip().rstrip("/")
 
 if PRODUCTION_FRONTEND_URL:
     FRONTEND_URLS.append(PRODUCTION_FRONTEND_URL)
 
 app = FastAPI(
     title="FOXICAN AI API",
-    version="2.2.0",
+    version="2.3.0",
 )
 
 app.add_middleware(
@@ -69,7 +74,11 @@ class VideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=2500)
     ratio: str = "16:9"
     resolution: str = "720P"
-    duration: int = Field(default=60, ge=10, le=MAX_VIDEO_DURATION)
+    duration: int = Field(
+        default=60,
+        ge=10,
+        le=MAX_VIDEO_DURATION,
+    )
 
 
 # -------------------- COMMON HELPERS --------------------
@@ -132,7 +141,12 @@ def response_error(response: httpx.Response) -> str:
         return response.text[:500] or "Empty provider response."
 
 
-def get_image_dimensions(aspect_ratio: str) -> tuple[int, int]:
+# -------------------- IMAGE DIMENSIONS --------------------
+
+def get_image_dimensions(
+    aspect_ratio: str,
+) -> tuple[int, int]:
+
     dimensions = {
         "1:1": (1024, 1024),
         "16:9": (1344, 768),
@@ -150,9 +164,69 @@ def get_image_dimensions(aspect_ratio: str) -> tuple[int, int]:
     return dimensions[aspect_ratio]
 
 
-def get_image_bytes(response: httpx.Response) -> tuple[bytes, str]:
+# -------------------- IMAGE PROCESSING --------------------
+
+def resize_image_to_ratio(
+    image_bytes: bytes,
+    aspect_ratio: str,
+    content_type: str,
+) -> tuple[bytes, str]:
+
+    width, height = get_image_dimensions(aspect_ratio)
+
+    try:
+        image = Image.open(BytesIO(image_bytes))
+
+        image = ImageOps.exif_transpose(image)
+
+        image = image.convert("RGB")
+
+        image = ImageOps.fit(
+            image,
+            (width, height),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+
+        output = BytesIO()
+
+        if "png" in content_type.lower():
+            image.save(
+                output,
+                format="PNG",
+                optimize=True,
+            )
+
+            return output.getvalue(), "image/png"
+
+        image.save(
+            output,
+            format="JPEG",
+            quality=95,
+            optimize=True,
+        )
+
+        return output.getvalue(), "image/jpeg"
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not process generated image: {str(exc)}",
+        )
+
+
+# -------------------- CLOUDFLARE RESPONSE PARSING --------------------
+
+def get_image_bytes(
+    response: httpx.Response,
+) -> tuple[bytes, str]:
+
     content_type = response.headers.get(
-        "content-type", "image/jpeg"
+        "content-type",
+        "image/jpeg",
     ).split(";")[0]
 
     if content_type.startswith("image/"):
@@ -160,6 +234,7 @@ def get_image_bytes(response: httpx.Response) -> tuple[bytes, str]:
 
     try:
         data = response.json()
+
     except ValueError:
         raise HTTPException(
             status_code=502,
@@ -173,7 +248,12 @@ def get_image_bytes(response: httpx.Response) -> tuple[bytes, str]:
         )
 
     result = data.get("result", data)
-    image = result.get("image") if isinstance(result, dict) else None
+
+    image = (
+        result.get("image")
+        if isinstance(result, dict)
+        else None
+    )
 
     if not isinstance(image, str) or not image:
         raise HTTPException(
@@ -184,7 +264,9 @@ def get_image_bytes(response: httpx.Response) -> tuple[bytes, str]:
     try:
         if image.startswith("data:"):
             header, encoded = image.split(",", 1)
+
             mime = header.split(";")[0].replace("data:", "")
+
             return base64.b64decode(encoded), mime
 
         return base64.b64decode(image), "image/jpeg"
@@ -204,20 +286,19 @@ async def generate_scene_image(
     aspect_ratio: str = "1:1",
 ) -> tuple[bytes, str]:
 
-    width, height = get_image_dimensions(aspect_ratio)
+    get_image_dimensions(aspect_ratio)
 
     url = f"{CLOUDFLARE_API_BASE}/run/{IMAGE_MODEL}"
 
+    # FLUX Schnell request: do not send unsupported width/height.
     payload = {
         "prompt": prompt,
-        "steps": 4,
-        "width": width,
-        "height": height,
     }
 
     last_error = "Cloudflare request failed."
 
     for attempt in range(3):
+
         try:
             response = await client.post(
                 url,
@@ -227,11 +308,26 @@ async def generate_scene_image(
             )
 
             if response.is_success:
-                return get_image_bytes(response)
+
+                image_bytes, content_type = get_image_bytes(
+                    response
+                )
+
+                return resize_image_to_ratio(
+                    image_bytes,
+                    aspect_ratio,
+                    content_type,
+                )
 
             detail = response_error(response)
 
-            if response.status_code not in (429, 500, 502, 503, 504):
+            if response.status_code not in (
+                429,
+                500,
+                502,
+                503,
+                504,
+            ):
                 raise HTTPException(
                     status_code=502,
                     detail=f"Cloudflare error: {detail}",
@@ -245,11 +341,14 @@ async def generate_scene_image(
             raise
 
         except httpx.TimeoutException:
-            last_error = "Cloudflare image generation timed out."
+            last_error = (
+                "Cloudflare image generation timed out."
+            )
 
         except httpx.RequestError as exc:
             last_error = (
-                f"Could not connect to Cloudflare: {type(exc).__name__}"
+                f"Could not connect to Cloudflare: "
+                f"{type(exc).__name__}"
             )
 
         if attempt < 2:
@@ -257,7 +356,9 @@ async def generate_scene_image(
 
     raise HTTPException(
         status_code=502,
-        detail=f"Cloudflare failed after 3 attempts. {last_error}",
+        detail=(
+            f"Cloudflare failed after 3 attempts. {last_error}"
+        ),
     )
 
 
@@ -270,7 +371,9 @@ async def upload_scene_image(
     scene_number: int,
 ) -> str:
 
-    extension = "png" if "png" in content_type else "jpg"
+    extension = (
+        "png" if "png" in content_type else "jpg"
+    )
 
     filename = (
         f"foxican_{uuid.uuid4().hex}_scene_{scene_number}.{extension}"
@@ -343,6 +446,7 @@ async def upload_scene_image(
 # -------------------- VIDEO SCENES --------------------
 
 def build_scene_prompts(prompt: str) -> list[str]:
+
     scene_directions = [
         "Opening scene: a wide cinematic establishing shot.",
         "Second scene: show the main subject from a different camera angle.",
@@ -363,8 +467,14 @@ def build_scene_prompts(prompt: str) -> list[str]:
     ]
 
 
-def distribute_scene_durations(total_duration: int) -> list[int]:
-    scene_count = min(MAX_SCENES, total_duration)
+def distribute_scene_durations(
+    total_duration: int,
+) -> list[int]:
+
+    scene_count = min(
+        MAX_SCENES,
+        total_duration,
+    )
 
     base_duration = total_duration // scene_count
     remainder = total_duration % scene_count
@@ -372,6 +482,7 @@ def distribute_scene_durations(total_duration: int) -> list[int]:
     durations = []
 
     for index in range(scene_count):
+
         duration = base_duration
 
         if index < remainder:
@@ -408,6 +519,7 @@ def get_video_resolution(
         return "squared", 720, 720
 
     if ratio == "4:3":
+
         if resolution == "1080P":
             return "custom", 1440, 1080
 
@@ -434,7 +546,9 @@ def build_movie_json(
         resolution,
     )
 
-    scene_durations = distribute_scene_durations(total_duration)
+    scene_durations = distribute_scene_durations(
+        total_duration
+    )
 
     pan_directions = [
         "right",
@@ -450,6 +564,7 @@ def build_movie_json(
     for index, (image_url, duration) in enumerate(
         zip(image_urls, scene_durations)
     ):
+
         scenes.append({
             "comment": f"FOXICAN AI Scene {index + 1}",
             "duration": duration,
@@ -523,6 +638,7 @@ async def create_and_wait_for_video(
             )
 
         data = response.json()
+
         project_id = data.get("project")
 
         if not project_id:
@@ -532,6 +648,7 @@ async def create_and_wait_for_video(
             )
 
         for _ in range(180):
+
             await asyncio.sleep(5)
 
             status_response = await client.get(
@@ -548,10 +665,13 @@ async def create_and_wait_for_video(
                 )
 
             status_data = status_response.json()
+
             movie_data = status_data.get("movie", {})
+
             status = movie_data.get("status", "").lower()
 
             if status == "done":
+
                 video_url = movie_data.get("url")
 
                 if (
@@ -562,7 +682,9 @@ async def create_and_wait_for_video(
 
                 raise HTTPException(
                     status_code=502,
-                    detail="Render completed but no video URL was returned.",
+                    detail=(
+                        "Render completed but no video URL was returned."
+                    ),
                 )
 
             if status in {"error", "timeout"}:
@@ -576,7 +698,10 @@ async def create_and_wait_for_video(
 
         raise HTTPException(
             status_code=504,
-            detail="Video rendering is taking too long. Please try again later.",
+            detail=(
+                "Video rendering is taking too long. "
+                "Please try again later."
+            ),
         )
 
     except HTTPException:
@@ -599,23 +724,28 @@ async def create_and_wait_for_video(
 
 @app.get("/")
 async def root():
+
     return {
         "name": "FOXICAN AI API",
         "status": "running",
-        "version": "2.2.0",
+        "version": "2.3.0",
     }
 
 
 @app.get("/api/health")
 async def health():
+
     return {
         "status": "ok",
         "image_model": IMAGE_MODEL,
         "video_model": "JSON2Video",
         "cloudflare_configured": bool(
-            CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN
+            CLOUDFLARE_ACCOUNT_ID
+            and CLOUDFLARE_API_TOKEN
         ),
-        "json2video_configured": bool(JSON2VIDEO_API_KEY),
+        "json2video_configured": bool(
+            JSON2VIDEO_API_KEY
+        ),
         "production_frontend_configured": bool(
             PRODUCTION_FRONTEND_URL
         ),
@@ -627,6 +757,7 @@ async def health():
 
 @app.post("/api/generate-image")
 async def generate_image(request: ImageRequest):
+
     require_cloudflare()
 
     prompt = request.prompt.strip()
@@ -644,16 +775,21 @@ async def generate_image(request: ImageRequest):
         )
 
     async with httpx.AsyncClient() as client:
+
         image_bytes, content_type = await generate_scene_image(
             client,
             prompt,
             request.aspect_ratio,
         )
 
-    encoded = base64.b64encode(image_bytes).decode("ascii")
+    encoded = base64.b64encode(
+        image_bytes
+    ).decode("ascii")
 
     return {
-        "image": f"data:{content_type};base64,{encoded}",
+        "image": (
+            f"data:{content_type};base64,{encoded}"
+        ),
         "aspect_ratio": request.aspect_ratio,
         "quality": request.quality,
         "model": IMAGE_MODEL,
@@ -669,6 +805,7 @@ async def generate_image(request: ImageRequest):
 
 @app.post("/api/generate-video")
 async def generate_video(request: VideoRequest):
+
     require_cloudflare()
     require_json2video()
 
@@ -680,17 +817,29 @@ async def generate_video(request: VideoRequest):
             detail="Prompt cannot be empty.",
         )
 
-    get_video_resolution(request.ratio, request.resolution)
+    get_video_resolution(
+        request.ratio,
+        request.resolution,
+    )
 
     image_urls = []
 
     scene_prompts = build_scene_prompts(prompt)
-    scene_durations = distribute_scene_durations(request.duration)
-    selected_scene_prompts = scene_prompts[:len(scene_durations)]
+
+    scene_durations = distribute_scene_durations(
+        request.duration
+    )
+
+    selected_scene_prompts = scene_prompts[
+        :len(scene_durations)
+    ]
 
     async with httpx.AsyncClient() as client:
 
-        for index, scene_prompt in enumerate(selected_scene_prompts):
+        for index, scene_prompt in enumerate(
+            selected_scene_prompts
+        ):
+
             image_bytes, content_type = await generate_scene_image(
                 client,
                 scene_prompt,
