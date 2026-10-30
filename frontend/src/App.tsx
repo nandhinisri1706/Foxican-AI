@@ -16,9 +16,7 @@ type HistoryItem = {
 
 const HISTORY_KEY = "foxican-ai-history";
 const MAX_HISTORY = 15;
-const API_URL =
-  import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
-
+const API_URL = "";
 function getImageSource(image: unknown): string {
   if (typeof image !== "string" || !image.trim()) {
     throw new Error("The image API did not return a valid image.");
